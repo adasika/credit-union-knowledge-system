@@ -46,53 +46,53 @@ _load_dotenv()
 # ---------------------------------------------------------------------------
 # Authority tiers
 # ---------------------------------------------------------------------------
-AUTHORITY_RULES = [
-    (0, [
-        r"dupaco\.com/personal/loans/auto-motorcycle-loans",
-        r"dupaco\.com/personal/loans/auto-loans",
-        r"dupaco\.com/personal/loans/home-loans",
-        r"dupaco\.com/personal/loans/home-equity",
-        r"dupaco\.com/personal/loans/personal-loans",
-        r"dupaco\.com/personal/loans/student-loans",
-        r"dupaco\.com/personal/loans/loan-protection",
-        r"dupaco\.com/personal/savings-account$",
-        r"dupaco\.com/personal/checking-accounts$",
-        r"dupaco\.com/personal/credit-cards$",
-        r"dupaco\.com/personal/retirement",
-        r"dupaco\.com/business/credit-cards$",
-        r"dupaco\.com/business/savings-accounts",
-        r"dupaco\.com/business/checking-accounts",
-        r"dupaco\.com/business/loans",
-        r"dupaco\.com/business/cash-management",
-        r"dupaco\.com/contact$",
-        r"dupaco\.com/about/join$",
-        r"dupaco\.com/about$",
-        r"dupaco\.com/about/member",
-        r"dupaco\.com/switch-and-earn",
-        r"dupaco\.com/earn-more",
-        r"dupaco\.com/community$",
-        r"dupaco\.com/$",
-    ]),
-    (1, [
-        r"dupaco\.com/personal/",
-        r"dupaco\.com/business/",
-        r"dupaco\.com/resources",
-        r"dupaco\.com/about/",
-        r"dupaco\.com/savings-account/",
-        r"join\.dupaco\.com",
-    ]),
-    (2, [r"dupaco\.com/calculators/"]),
-    (3, [r"dupaco\.com/learn/blog/"]),
-    (4, [r"dupaco\.com/newsroom/"]),
+_AUTH_TIER = [
+    (0, re.compile(
+        r"dupaco\.com/personal/loans/auto-motorcycle-loans"
+        r"|dupaco\.com/personal/loans/auto-loans"
+        r"|dupaco\.com/personal/loans/home-loans"
+        r"|dupaco\.com/personal/loans/home-equity"
+        r"|dupaco\.com/personal/loans/personal-loans"
+        r"|dupaco\.com/personal/loans/student-loans"
+        r"|dupaco\.com/personal/loans/loan-protection"
+        r"|dupaco\.com/personal/savings-account$"
+        r"|dupaco\.com/personal/checking-accounts$"
+        r"|dupaco\.com/personal/credit-cards$"
+        r"|dupaco\.com/personal/retirement"
+        r"|dupaco\.com/business/credit-cards$"
+        r"|dupaco\.com/business/savings-accounts"
+        r"|dupaco\.com/business/checking-accounts"
+        r"|dupaco\.com/business/loans"
+        r"|dupaco\.com/business/cash-management"
+        r"|dupaco\.com/contact$"
+        r"|dupaco\.com/about/join$"
+        r"|dupaco\.com/about$"
+        r"|dupaco\.com/about/member"
+        r"|dupaco\.com/switch-and-earn"
+        r"|dupaco\.com/earn-more"
+        r"|dupaco\.com/community$"
+        r"|dupaco\.com/$"
+    )),
+    (1, re.compile(
+        r"dupaco\.com/personal/"
+        r"|dupaco\.com/business/"
+        r"|dupaco\.com/resources"
+        r"|dupaco\.com/about/"
+        r"|dupaco\.com/savings-account/"
+        r"|join\.dupaco\.com"
+    )),
+    (2, re.compile(r"dupaco\.com/calculators/")),
+    (3, re.compile(r"dupaco\.com/learn/blog/")),
+    (4, re.compile(r"dupaco\.com/newsroom/")),
 ]
+_DATE_URL_RE = re.compile(r"\d{4}/\d{2}/\d{2}/")
 
 
 def _get_authority(url: str) -> int:
-    for tier, patterns in AUTHORITY_RULES:
-        for pat in patterns:
-            if re.search(pat, url):
-                return tier
-    if re.search(r"\d{4}/\d{2}/\d{2}/", url):
+    for tier, pat in _AUTH_TIER:
+        if pat.search(url):
+            return tier
+    if _DATE_URL_RE.search(url):
         return 4
     return 1
 
@@ -100,6 +100,9 @@ def _get_authority(url: str) -> int:
 # ---------------------------------------------------------------------------
 # Chunking
 # ---------------------------------------------------------------------------
+_HEADING_RE = re.compile(r"^#{1,6}\s+")
+
+
 def _chunk_page(markdown: str, title: str) -> list[dict]:
     chunks = []
     lines = markdown.split("\n")
@@ -112,9 +115,9 @@ def _chunk_page(markdown: str, title: str) -> list[dict]:
             chunks.append({"heading": current_heading, "text": text})
 
     for line in lines:
-        if re.match(r"^#{1,6}\s+", line):
+        if _HEADING_RE.match(line):
             flush()
-            current_heading = re.sub(r"^#{1,6}\s+", "", line).strip()
+            current_heading = _HEADING_RE.sub("", line).strip()
             current_lines = [line]
         else:
             current_lines.append(line)
@@ -140,6 +143,7 @@ class BM25:
         self.k1, self.b = k1, b
         self.docs, self.doc_tokens, self.doc_lens = [], [], []
         self.df, self.n = Counter(), 0
+        self.inv_idx = defaultdict(set)
         self._built = False
 
     def add(self, meta: dict, text: str):
@@ -155,9 +159,13 @@ class BM25:
         self.n = len(self.docs)
         self.avgdl = sum(self.doc_lens) / self.n if self.n else 1
         self.df = Counter()
-        for tf in self.doc_tokens:
+        self.inv_idx = defaultdict(set)
+        for i, tf in enumerate(self.doc_tokens):
             for t in tf:
                 self.df[t] += 1
+                self.inv_idx[t].add(i)
+        n = self.n
+        self.idf = {t: math.log((n - df + 0.5) / (df + 0.5) + 1.0) for t, df in self.df.items()}
         self._built = True
 
     def search(self, query: str, top_k=40) -> list[tuple[dict, float]]:
@@ -167,21 +175,30 @@ class BM25:
         qtokens = tokenize(query)
         if not qtokens:
             return []
+        inv = self.inv_idx
+        candidates = set()
+        valid_tokens = []
+        for t in qtokens:
+            if t in inv:
+                candidates |= inv[t]
+                valid_tokens.append(t)
+        if not candidates:
+            return []
         scores = []
-        for i in range(self.n):
+        k1, b, avgdl = self.k1, self.b, self.avgdl
+        idf = self.idf
+        k1p1 = k1 + 1
+        doc_lens = self.doc_lens
+        doc_tokens = self.doc_tokens
+        qt_idfs = [(t, idf[t]) for t in valid_tokens]
+        for i in candidates:
             score = 0.0
-            dl = self.doc_lens[i]
-            tf_map = self.doc_tokens[i]
-            for t in qtokens:
-                if t not in self.df:
-                    continue
+            norm = k1 * (1 - b + b * doc_lens[i] / avgdl)
+            tf_map = doc_tokens[i]
+            for t, t_idf in qt_idfs:
                 tf = tf_map.get(t, 0)
-                if tf == 0:
-                    continue
-                idf = math.log((self.n - self.df[t] + 0.5) / (self.df[t] + 0.5) + 1.0)
-                num = tf * (self.k1 + 1)
-                den = tf + self.k1 * (1 - self.b + self.b * dl / self.avgdl)
-                score += idf * num / den
+                if tf:
+                    score += t_idf * tf * k1p1 / (tf + norm)
             if score > 0:
                 scores.append((i, score))
         scores.sort(key=lambda x: -x[1])
@@ -201,16 +218,15 @@ class CreditUnionKnowledge:
         self.pages_by_snapshot = {}
         self.page_history = defaultdict(list)
         self._conflicts = []
+        self._conflict_urls = {}
         self._cache = {}
         self._client = None
-        self._has_api_key = bool(
-            os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-        )
+        self._has_api_key = bool(os.environ.get("GEMINI_API_KEY"))
 
     def _get_client(self):
         if self._client is None and self._has_api_key:
-            import anthropic
-            self._client = anthropic.Anthropic()
+            from google import genai
+            self._client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
         return self._client
 
     def ingest(self, snapshot: Snapshot) -> None:
@@ -340,14 +356,25 @@ class CreditUnionKnowledge:
 
         return results
 
-    def _build_context(self, docs: list[dict], max_chars=15000) -> str:
+    _AUTH_LABELS = {0: "PRODUCT PAGE", 1: "GENERAL", 2: "CALCULATOR", 3: "BLOG", 4: "NEWS"}
+    _REFUSED_RE = re.compile(
+        r"(isn't listed|not listed|don't have|no information|please contact|cannot find|not published|not available|not provided|does not publish|doesn't publish|doesn't list|does not list|no rate|not mentioned|not offered|does not offer|doesn't offer)",
+        re.I,
+    )
+    _RATE_Q_RE = re.compile(r"\b(rate|apr|apy|interest)\b", re.I)
+    _HOURS_Q_RE = re.compile(r"\b(hours|schedule|lobby|open|close)\b", re.I)
+    _ADDR_Q_RE = re.compile(r"\b(address|location|where)\b", re.I)
+
+    def _build_context(self, docs: list[dict], max_chars=12000) -> str:
+        sorted_docs = sorted(docs, key=lambda d: d["authority"])
         parts = []
         total = 0
-        for doc in docs:
+        for doc in sorted_docs:
             text = doc["relevant_text"]
-            if len(text) > 5000:
-                text = text[:5000]
-            header = f"[Source: {doc['url']}]"
+            if len(text) > 4000:
+                text = text[:4000]
+            label = self._AUTH_LABELS.get(doc["authority"], "OTHER")
+            header = f"[Source: {doc['url']} ({label})]"
             part = f"{header}\n{text}"
             if total + len(part) > max_chars and parts:
                 break
@@ -364,39 +391,36 @@ class CreditUnionKnowledge:
         if as_of:
             date_note = f"\nIMPORTANT: Answer based on what the website showed as of {as_of}."
 
-        system = f"""You are a helpful assistant for Dupaco Community Credit Union. Answer using ONLY the website content provided.
+        system = f"""Answer using ONLY the Dupaco website content below.
+
+CRITICAL: Copy numbers, rates, and percentages EXACTLY as they appear in the source (e.g. "5.39% APR" not "5.4%"). Never round, reformat, or paraphrase numeric values.
 
 RULES:
-1. Give the CURRENT, specific value (rate, APY, fee, address, phone, etc.).
-2. For tiered rates (by balance, term, model year), give the specific tier matching the question. If the question is general (e.g. "certificate rates"), list ALL tiers.
-3. For certificates/CDs: list ALL available terms and rates without asking which term.
-4. If two pages show different values, trust the product/rate page over calculators or blog posts.
-5. If the answer is not in the content, say "That information isn't listed on the website. Please contact Dupaco at 800-373-7600 or visit dupaco.com/contact."
-6. Do NOT guess or invent information. Be concise and specific.
-7. Include exact numbers with APR/APY labels as shown in the source.
-8. For branch hours: give a typical schedule and note hours may vary by location.
-9. Never mention internal details (snapshots, authority tiers, etc.).{date_note}"""
+- For rate questions: give the EXACT rate/APY/APR for the specific tier or term asked about. If the question is general, list ALL tiers shown in the source tables.
+- Sources are labeled PRODUCT PAGE, CALCULATOR, BLOG, etc. ALWAYS use PRODUCT PAGE values over CALCULATOR values. Calculator rates may be outdated.
+- If the specific product, service, or branch asked about is NOT in the content (e.g. no construction loans listed, no adjustable-rate mortgage product offered), say exactly: "I don't have that information. Please contact Dupaco for assistance."
+- If the content discusses the topic but doesn't have the specific information requested, still provide what IS available.
+- Be concise. Include all relevant numbers.{date_note}"""
 
-        try:
-            resp = client.messages.create(
-                model="claude-haiku-5-5",
-                max_tokens=800,
-                system=system,
-                messages=[{"role": "user", "content": f"Website content:\n{context}\n\nMember question: {question}"}],
-            )
-            text = resp.content[0].text.strip()
-            refused = bool(re.search(
-                r"(isn't listed|not listed|don't have|no information|please contact|cannot find|not published|not available|not provided|does not publish|doesn't publish|doesn't list|does not list|no rate|not mentioned)",
-                text, re.I,
-            ))
-            return text, not refused
-        except Exception:
-            return self._answer_fallback(question, context, as_of)
-
-    def _answer_fallback(self, question: str, context: str, as_of: Optional[str] = None) -> tuple[str, bool]:
-        if not context.strip():
-            return "I don't have that information. Please contact Dupaco at 800-373-7600.", False
-        return context[:2000], True
+        from google.genai import types as genai_types
+        prompt = f"{system}\n\nWebsite content:\n{context}\n\nMember question: {question}"
+        config = genai_types.GenerateContentConfig(
+            max_output_tokens=500,
+            http_options=genai_types.HttpOptions(timeout=12000),
+        )
+        for _ in range(3):
+            try:
+                resp = client.models.generate_content(
+                    model="gemini-flash-lite-latest",
+                    contents=prompt,
+                    config=config,
+                )
+                text = resp.text.strip()
+                refused = bool(self._REFUSED_RE.search(text))
+                return text, not refused
+            except Exception:
+                continue
+        return None, None
 
     def answer(self, question: str, as_of: Optional[str] = None) -> Answer:
         cache_key = hashlib.md5(f"{question}||{as_of}".encode()).hexdigest()
@@ -414,10 +438,20 @@ RULES:
 
         context = self._build_context(docs)
 
+        extract_text, extract_conf = self._extract_answer(question, docs)
+
         if self._has_api_key:
-            text, confident = self._answer_with_llm(question, context, as_of=as_of)
+            llm_text, llm_conf = self._answer_with_llm(question, context, as_of=as_of)
+            if llm_text is None:
+                text, confident = extract_text, extract_conf
+            elif llm_conf:
+                text, confident = llm_text, True
+            elif self._RATE_Q_RE.search(question):
+                text, confident = llm_text, False
+            else:
+                text, confident = extract_text, extract_conf
         else:
-            text, confident = self._extract_answer(question, docs)
+            text, confident = extract_text, extract_conf
 
         sources = []
         seen_urls = set()
@@ -427,46 +461,58 @@ RULES:
                 sources.append(Source(url=doc["url"], snapshot_id=doc["snapshot_id"]))
 
         conflict_note = None
-        for c in self._conflicts:
-            for s in c.sources:
-                if s.url in seen_urls:
-                    conflict_note = f"{c.topic}: {c.reason}"
-                    break
-            if conflict_note:
+        for url in seen_urls:
+            if url in self._conflict_urls:
+                conflict_note = self._conflict_urls[url]
                 break
 
         ans = Answer(text=text, sources=sources, confident=confident, conflict_note=conflict_note)
         self._cache[cache_key] = ans
         return ans
 
+
+    _RATE_PAT = re.compile(r"\d+\.?\d*\s*%")
+    _TIME_PAT = re.compile(r"\b\d{1,2}:\d{2}\b|\b\d{1,2}\s*[ap]\.?m\.?\b", re.I)
+    _ADDR_PAT = re.compile(r"\b\d{2,5}\s+[A-Z][a-z]+\s+(St|Ave|Rd|Blvd|Dr|Ln|Ct|Way|Pl)", re.I)
+
+    def _extraction_has_answer(self, question: str, text: str) -> bool:
+        if self._RATE_Q_RE.search(question) and self._RATE_PAT.search(text):
+            return True
+        if self._HOURS_Q_RE.search(question) and self._TIME_PAT.search(text):
+            return True
+        if self._ADDR_Q_RE.search(question) and self._ADDR_PAT.search(text):
+            return True
+        return False
+
     def _extract_answer(self, question: str, docs: list[dict]) -> tuple[str, bool]:
-        """Smart fallback: return relevant content from top-ranked docs."""
         if not docs:
-            return "I don't have that information. Please contact Dupaco at 800-373-7600.", False
+            return "I don't have that information. Please contact Dupaco for assistance.", False
 
         parts = []
         total = 0
         for doc in docs[:3]:
             text = doc["relevant_text"]
-            if total + len(text) > 2500:
-                text = text[:max(300, 2500 - total)]
+            if total + len(text) > 3500:
+                text = text[:max(500, 3500 - total)]
             if text.strip():
                 parts.append(text)
                 total += len(text)
-            if total >= 2000:
+            if total >= 3000:
                 break
 
         if parts:
             return "\n\n".join(parts), True
-        return "I don't have that information. Please contact Dupaco at 800-373-7600.", False
+        return "I don't have that information. Please contact Dupaco for assistance.", False
 
     # ------------------------------------------------------------------
     # Conflict detection
     # ------------------------------------------------------------------
+    _RATE_RE = re.compile(r"(\d+\.?\d*)\s*%\s*(APR|APY)", re.IGNORECASE)
+
     def _detect_conflicts(self):
         self._conflicts = []
         seen = set()
-        rate_re = re.compile(r"(\d+\.?\d*)\s*%\s*(APR|APY)", re.IGNORECASE)
+        rate_re = self._RATE_RE
 
         for url, history in self.page_history.items():
             if len(history) < 2 or _get_authority(url) >= 3:
@@ -493,51 +539,61 @@ RULES:
                 ))
 
         self._detect_cross_page_conflicts()
+        self._conflict_urls = {}
+        for c in self._conflicts:
+            note = f"{c.topic}: {c.reason}"
+            for s in c.sources:
+                if s.url not in self._conflict_urls:
+                    self._conflict_urls[s.url] = note
 
     def _detect_cross_page_conflicts(self):
         if not self.latest_snapshot_id:
             return
         pages = self.pages_by_snapshot.get(self.latest_snapshot_id, {})
-        rate_re = re.compile(r"(\d+\.?\d*)\s*%\s*(APR|APY)", re.IGNORECASE)
-        page_rates = {}
+        rate_re = self._RATE_RE
+
+        type_to_entries = defaultdict(list)
         for url, pdata in pages.items():
             auth = pdata["authority"]
             if auth >= 3:
                 continue
-            matches = rate_re.findall(pdata["markdown"])
-            if matches:
-                page_rates[url] = {"auth": auth, "rates": {(r, t.upper()) for r, t in matches}, "title": pdata["title"]}
+            for rate_val, rate_type in rate_re.findall(pdata["markdown"]):
+                rt = rate_type.upper()
+                type_to_entries[rt].append((rate_val, auth, url, pdata["title"]))
 
         seen = set()
-        urls = list(page_rates.keys())
-        for i in range(len(urls)):
-            for j in range(i + 1, len(urls)):
-                u1, u2 = urls[i], urls[j]
-                p1, p2 = page_rates[u1], page_rates[u2]
-                if p1["auth"] == p2["auth"]:
-                    continue
-                auth_url = u1 if p1["auth"] < p2["auth"] else u2
-                stale_url = u2 if auth_url == u1 else u1
-                ap, sp = page_rates[auth_url], page_rates[stale_url]
-                for r1, t1 in ap["rates"]:
-                    for r2, t2 in sp["rates"]:
-                        if t1 == t2 and r1 != r2:
-                            pair = tuple(sorted([f"{r1}% {t1}", f"{r2}% {t2}"]))
-                            if pair in seen:
-                                continue
-                            seen.add(pair)
-                            self._conflicts.append(Conflict(
-                                topic=f"{t1} discrepancy: {ap['title']} vs {sp['title']}",
-                                values=[f"{r1}% {t1}", f"{r2}% {t2}"],
-                                sources=[
-                                    Source(url=auth_url, snapshot_id=self.latest_snapshot_id),
-                                    Source(url=stale_url, snapshot_id=self.latest_snapshot_id),
-                                ],
-                                resolution=f"{r1}% {t1}",
-                                reason=f"{auth_url} (product page) is more authoritative than {stale_url}.",
-                            ))
-                            if len(self._conflicts) > 50:
-                                return
+        sid = self.latest_snapshot_id
+        for rt, entries in type_to_entries.items():
+            by_rate = defaultdict(list)
+            for rate_val, auth, url, title in entries:
+                by_rate[rate_val].append((auth, url, title))
+            rate_vals = list(by_rate.keys())
+            for i in range(len(rate_vals)):
+                for j in range(i + 1, len(rate_vals)):
+                    r1, r2 = rate_vals[i], rate_vals[j]
+                    pair = tuple(sorted([f"{r1}% {rt}", f"{r2}% {rt}"]))
+                    if pair in seen:
+                        continue
+                    best1 = min(by_rate[r1], key=lambda x: x[0])
+                    best2 = min(by_rate[r2], key=lambda x: x[0])
+                    if best1[0] == best2[0]:
+                        continue
+                    if best1[0] < best2[0]:
+                        a_rate, a_auth, a_url, a_title = r1, *best1
+                        s_rate, s_auth, s_url, s_title = r2, *best2
+                    else:
+                        a_rate, a_auth, a_url, a_title = r2, *best2
+                        s_rate, s_auth, s_url, s_title = r1, *best1
+                    seen.add(pair)
+                    self._conflicts.append(Conflict(
+                        topic=f"{rt} discrepancy: {a_title} vs {s_title}",
+                        values=[f"{a_rate}% {rt}", f"{s_rate}% {rt}"],
+                        sources=[Source(url=a_url, snapshot_id=sid), Source(url=s_url, snapshot_id=sid)],
+                        resolution=f"{a_rate}% {rt}",
+                        reason=f"{a_url} (product page) is more authoritative than {s_url}.",
+                    ))
+                    if len(self._conflicts) > 50:
+                        return
 
     def conflicts(self) -> list[Conflict]:
         return self._conflicts

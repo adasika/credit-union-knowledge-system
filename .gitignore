@@ -2,9 +2,3 @@
 __pycache__/
 *.pyc
 results/
-snapshots/
-snapshots_zip/
-eval/
-harness/
-starter/
-*.pdf
