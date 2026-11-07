@@ -1,0 +1,4 @@
+# Install the package for your chosen LLM provider:
+google-genai>=1.0.0   # Gemini  (set GEMINI_API_KEY)
+openai>=1.0.0          # OpenAI  (set OPENAI_API_KEY)
+anthropic>=0.30.0      # Anthropic (set ANTHROPIC_API_KEY)
